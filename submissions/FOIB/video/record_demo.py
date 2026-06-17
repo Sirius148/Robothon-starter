@@ -118,6 +118,27 @@ TWO_EGG_TIER_PARAMS = {
 }
 
 
+def _collect_contacts(model, data):
+    """Snapshot all active contacts: returns list of (geom1_name, geom2_name, normal_force_N)."""
+    force_buf = np.zeros(6)
+    out = []
+    for i in range(data.ncon):
+        c = data.contact[i]
+        mujoco.mj_contactForce(model, data, i, force_buf)
+        n1 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, c.geom1) or f"geom{c.geom1}"
+        n2 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, c.geom2) or f"geom{c.geom2}"
+        out.append((n1, n2, abs(float(force_buf[0]))))
+    return out
+
+
+def _ee_jac_frob(model, data, site_id):
+    """Frobenius norm of the 3×nv translational end-effector Jacobian (mj_jacSite)."""
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    mujoco.mj_jacSite(model, data, jacp, jacr, site_id)
+    return float(np.linalg.norm(jacp))
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="FOIB-Egg benchmark recorder")
     p.add_argument("--out",      default="demo.mp4")
@@ -314,7 +335,7 @@ def _end_card_two_egg(width, height, tier, records):
     pct        = 100 * successes // n if n else 0
 
     card = np.zeros((height, width, 3), dtype=np.uint8)
-    cy   = max(24, height // 2 - 158)
+    cy   = max(14, height // 2 - 170)
 
     cy = _centred_text(card, "FOIB-Egg v2  TWO-EGG RESULTS",
                        cy, 0.78, (255, 200, 80), thickness=2)
@@ -346,6 +367,9 @@ def _end_card_two_egg(width, height, tier, records):
     _row(f"Peak grip (max)       {max_grip:.3f} N",   (180, 180, 180), 0.50)
     _row(f"Avg distractor disp   {avg_disp:.1f} mm",  (180, 180, 180), 0.50)
     _row(f"Avg steps / ep        {avg_steps}",         (180, 180, 180), 0.50)
+
+    _row("TWO-EGG: 10->7->4->3  (easy->extreme)",    (200, 180, 100), 0.44)
+    _row("FAIL: DISTRACTOR_DISTURBED / DROPPED",      (150, 150, 200), 0.42)
     return card
 
 
@@ -364,6 +388,8 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
     fail           = None
     peak_grip      = 0.0
     max_contacts   = 0
+    contacts_end   = []
+    jac_frob       = 0.0
 
     for step_i in range(MAX_STEPS):
         phase, fail = ctrl.step()
@@ -385,6 +411,8 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
             frames_written += 1
 
         if phase in (Phase.DONE, Phase.FAIL):
+            contacts_end = _collect_contacts(model, data)
+            jac_frob     = _ee_jac_frob(model, data, ctrl.ee_site)
             updated_successes = prior_successes + (1 if phase == Phase.DONE else 0)
             renderer.update_scene(data, camera=args.camera)
             rgb  = renderer.render()
@@ -405,7 +433,7 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
             break
 
     fail_str = fail.value if fail is not None else ""
-    return phase, fail_str, frames_written, peak_grip, max_contacts
+    return phase, fail_str, frames_written, peak_grip, max_contacts, contacts_end, jac_frob
 
 
 def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
@@ -422,6 +450,8 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
     wrong_object_contact = False
     max_distractor_disp  = 0.0
     target_pick_success  = False
+    contacts_end         = []
+    jac_frob             = 0.0
 
     for step_i in range(MAX_STEPS):
         phase, fail = ctrl.step()
@@ -462,6 +492,8 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
             frames_written += 1
 
         if phase in (Phase.DONE, Phase.FAIL):
+            contacts_end = _collect_contacts(model, data)
+            jac_frob     = _ee_jac_frob(model, data, ctrl.ee_site)
             egg2_xy_f  = data.xpos[egg2_bid, :2].copy()
             final_disp = float(np.linalg.norm(egg2_xy_f - distractor_init_xy))
             max_distractor_disp = max(max_distractor_disp, final_disp)
@@ -530,6 +562,8 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
         "target_pick_success":          target_pick_success,
         "target_place_success":         phase == Phase.DONE,
         "target_final_dist_to_bowl_mm": round(target_final_dist * 1000, 1),
+        "contacts_at_end":              contacts_end,
+        "ee_jac_frob":                  jac_frob,
     }
 
 
@@ -661,6 +695,10 @@ def main():
                   f"  peak={rec['peak_grip']:.3f}N"
                   f"  dist_disp={rec['distractor_displacement_mm']:.1f}mm"
                   f"  wc={int(rec['wrong_object_contact'])}")
+            print(f"    JAC_EE ||J||_F={m['ee_jac_frob']:.4f}"
+                  f"  contacts@end={len(m['contacts_at_end'])}")
+            for cn1, cn2, fn in m["contacts_at_end"]:
+                print(f"      {cn1} <-> {cn2}  Fn={fn:.3f}N")
 
             if ep < n_eps - 1:
                 fail_tag = ("" if m["result"] == "SUCCESS"
@@ -700,10 +738,9 @@ def main():
             else:
                 _randomize(model, data, ctrl, rng, bowl_bid, tp)
 
-            phase, fail_str, nf, peak_grip, contact_max = _run_episode(
-                ctrl, model, data, renderer, writer, args,
-                ep_num, n_eps, successes, args.tier,
-            )
+            phase, fail_str, nf, peak_grip, contact_max, contacts_end, jac_frob = \
+                _run_episode(ctrl, model, data, renderer, writer, args,
+                             ep_num, n_eps, successes, args.tier)
             total_frames += nf
 
             ep_result = "SUCCESS" if phase == Phase.DONE else f"FAIL:{fail_str}"
@@ -726,6 +763,9 @@ def main():
 
             print(f"{ep_result}  steps={ctrl.step_count}"
                   f"  peak_grip={peak_grip:.3f}N  frames={nf}")
+            print(f"    JAC_EE ||J||_F={jac_frob:.4f}  contacts@end={len(contacts_end)}")
+            for cn1, cn2, fn in contacts_end:
+                print(f"      {cn1} <-> {cn2}  Fn={fn:.3f}N")
 
             if ep < n_eps - 1:
                 card    = _inter_card(args.width, args.height,
