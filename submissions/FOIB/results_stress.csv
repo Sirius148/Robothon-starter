@@ -1,0 +1,11 @@
+ep,tier,result,grip_peak,contact_max,steps
+1,stress,SUCCESS,0.3700,3,709
+2,stress,SUCCESS,0.3700,2,709
+3,stress,SUCCESS,0.3700,3,709
+4,stress,SUCCESS,0.3700,4,709
+5,stress,SUCCESS,0.3700,2,709
+6,stress,SUCCESS,0.3700,3,709
+7,stress,FAIL:DROPPED,0.3600,2,709
+8,stress,SUCCESS,0.3700,4,709
+9,stress,SUCCESS,0.3700,3,709
+10,stress,SUCCESS,0.3700,3,709

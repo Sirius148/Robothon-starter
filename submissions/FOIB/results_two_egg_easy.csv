@@ -1,0 +1,11 @@
+episode_id,tier,result,target_success,wrong_object_contact,wrong_object_grasp,distractor_displacement_mm,distractor_stable,target_pick_success,target_place_success,target_final_dist_to_bowl_mm,steps,peak_grip,contact_count,target_egg_id,distractor_egg_id
+1,easy,SUCCESS,True,False,False,0.0,True,True,True,22.6,709,0.3700,2,egg,egg2
+2,easy,SUCCESS,True,False,False,0.0,True,True,True,11.3,709,0.3700,3,egg,egg2
+3,easy,SUCCESS,True,False,False,0.0,True,True,True,5.3,709,0.3600,2,egg,egg2
+4,easy,SUCCESS,True,False,False,0.0,True,True,True,14.7,709,0.3700,2,egg,egg2
+5,easy,SUCCESS,True,False,False,0.0,True,True,True,22.4,709,0.3600,2,egg,egg2
+6,easy,SUCCESS,True,False,False,0.0,True,True,True,9.6,709,0.3700,3,egg,egg2
+7,easy,SUCCESS,True,False,False,0.0,True,True,True,16.4,709,0.3700,3,egg,egg2
+8,easy,SUCCESS,True,False,False,0.0,True,True,True,23.0,709,0.3700,2,egg,egg2
+9,easy,SUCCESS,True,False,False,0.0,True,True,True,25.5,709,0.3600,2,egg,egg2
+10,easy,SUCCESS,True,False,False,0.0,True,True,True,6.9,709,0.3700,2,egg,egg2
