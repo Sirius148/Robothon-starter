@@ -204,6 +204,46 @@ Add `--two-egg` to any existing invocation. All other flags are unchanged.
 Single-egg backward compatibility preserved: omitting `--two-egg` runs the
 original benchmark with the original CSV schema.
 
+### Two-egg dynamic disturbance mode
+```bash
+python video/record_demo.py \
+    --two-egg --dynamic-dist --episodes 10 --tier medium --seed 42 \
+    --out benchmark_two_egg_dynamic.mp4 --log results_dynamic.csv
+```
+
+Adds `--dynamic-dist` to give egg2 a random rolling kick at each episode
+reset. This is an **extension** of the static-placement benchmark — all
+existing parameters (`min_egg_sep`, `dist_stability_thresh`, tier params)
+are unchanged. The dynamic flag introduces *temporal uncertainty*: egg2
+moves on its own before any arm contact, so the arm must pick and place
+egg1 in a scene that is evolving during the episode.
+
+### Data collection mode
+```bash
+python video/record_demo.py \
+    --episodes 10 --tier medium --seed 42 \
+    --out benchmark.mp4 --collect --collect-dir trajectories/
+```
+
+Add `--collect` to any invocation (single-egg, `--two-egg`, or `--two-egg
+--dynamic-dist`). Each episode exports one CSV to `--collect-dir`:
+
+```
+trajectories/
+├── trajectory_ep001.csv
+├── trajectory_ep002.csv
+...
+```
+
+Every row is one simulation step. Columns: `step, episode_id, tier, phase,
+ep_result, j1_pos, j2_pos, j3_pos, ee_x/y/z, egg_x/y/z, bowl_x/y/z,
+grip_force, contact_count, grasped`. Two-egg mode appends `egg2_x/y/z,
+egg2_disp_mm, distractor_rolling, wrong_object_contact`. The last row of
+each file carries the true `ep_result`; all earlier rows have `ep_result=""`.
+
+`--collect` is purely additive: video, benchmark CSV, and success rates are
+unchanged.
+
 ### Interactive viewer
 ```bash
 python scripts/run_interactive.py
@@ -309,7 +349,8 @@ extension: no existing test path, constant, or threshold was modified.
 
 | Code | Trigger | Who fails |
 |------|---------|-----------|
-| `DISTRACTOR_DISTURBED` | distractor XY displacement > threshold after episode end | v2 only — egg1 placed correctly, egg2 knocked away |
+| `DISTRACTOR_DISTURBED` | distractor XY displacement > threshold after episode end | v2 only — egg1 placed correctly, egg2 knocked away by arm |
+| `DISTRACTOR_ROLLING` | egg2 self-displacement > 20 mm before any finger contact | v2 dynamic mode only — egg2 rolled away under its own initial velocity |
 | `DROPPED` | egg1 below lift height, or missed bowl after release | same as v1 — arm loses egg1, often because distractor blocked approach |
 | `OVER-SQUEEZED` | grip force > 12 N | same as v1 |
 | `TIMEOUT` | phase exceeds 2000 steps | same as v1 |
@@ -354,6 +395,41 @@ target_egg_id, distractor_egg_id
 
 3-egg extension is possible but left for future work to avoid conflating density
 scaling with the current benchmark design.
+
+### Dynamic Disturbance Extension (`--dynamic-dist`)
+
+This is an **extension beyond the static-placement benchmark**, not a
+replacement. The static two-egg results (10→7→4→3 gradient) remain the
+primary benchmark; dynamic mode adds a second axis of difficulty.
+
+**Mechanism.** At each episode reset, egg2 receives a random rolling kick:
+consistent linear + angular velocity (no-slip: ω = v / R\_eff) in a random
+XY direction. With rolling friction = 0.005, a kick of 0.08 m/s travels
+~65 mm before stopping. The arm controller is unchanged — it has no
+knowledge of egg2's motion.
+
+**New failure mode: `DISTRACTOR_ROLLING`.** If egg2 self-displaces more
+than 20 mm before any finger contact occurs, the episode fails regardless
+of egg1 placement success. This distinguishes rolling (autonomous motion)
+from disturbance (arm contact).
+
+**Failure priority in dynamic mode:**
+
+```
+FAIL:DROPPED / OVER-SQUEEZED / TIMEOUT   — egg1 task failure (unchanged)
+FAIL:DISTRACTOR_ROLLING                  — egg2 rolled away before arm contact
+FAIL:DISTRACTOR_DISTURBED                — egg2 displaced by gripper contact
+SUCCESS
+```
+
+**Additional CSV columns (zero in static mode):**
+
+| Column | Description |
+|--------|-------------|
+| `distractor_rolling` | True if egg2 self-displaced > 20 mm pre-contact |
+| `egg2_self_disp_mm` | Max egg2 displacement before first finger contact (mm) |
+| `egg2_init_lin_vel` | Initial linear speed given to egg2 (m/s) |
+| `egg2_init_ang_vel` | Initial angular speed given to egg2 (rad/s) |
 
 ---
 

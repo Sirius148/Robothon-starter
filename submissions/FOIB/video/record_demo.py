@@ -45,6 +45,14 @@ _HOLD_INTER    = 1.5   # s — inter-episode card
 _HOLD_TITLE    = 2.5   # s — opening title card
 _HOLD_END      = 4.0   # s — closing results card
 
+# ── Dynamic disturbance constants ──────────────────────────────────────────────
+# egg2 is given a random initial rolling velocity at episode start.
+# Rolling is modelled as consistent (no-slip): omega = v / R_eff.
+# With rolling friction=0.005, a 0.08 m/s kick travels ~65 mm before stopping.
+DYNAMIC_VEL_LIN_MAX = 0.08   # m/s  — max initial linear speed for egg2
+_EGG_ROLL_RADIUS    = 0.024  # m    — effective rolling radius (avg of Rx=25, Ry=22 mm)
+ROLLING_THRESH      = 0.020  # m    — self-displacement threshold for DISTRACTOR_ROLLING
+
 # Randomisation ranges per tier.
 # Egg Y is capped at ±3 mm across all tiers: the kinematic-attach approach cannot
 # tolerate larger Y offsets without fingers pushing the egg before attach fires.
@@ -118,6 +126,39 @@ TWO_EGG_TIER_PARAMS = {
 }
 
 
+_TRAJ_FIELDS_BASE = (
+    "step", "episode_id", "tier", "phase", "ep_result",
+    "j1_pos", "j2_pos", "j3_pos",
+    "ee_x", "ee_y", "ee_z",
+    "egg_x", "egg_y", "egg_z",
+    "bowl_x", "bowl_y", "bowl_z",
+    "grip_force", "contact_count", "grasped",
+)
+
+_TRAJ_FIELDS_TWO_EGG = (
+    "egg2_x", "egg2_y", "egg2_z",
+    "egg2_disp_mm", "distractor_rolling", "wrong_object_contact",
+)
+
+
+class _TrajWriter:
+    """Writes one CSV per episode; each row is one sim step."""
+
+    def __init__(self, collect_dir, episode_id, two_egg=False):
+        os.makedirs(collect_dir, exist_ok=True)
+        path = os.path.join(collect_dir, f"trajectory_ep{episode_id:03d}.csv")
+        self._fh     = open(path, "w", newline="")
+        self._w      = csv.writer(self._fh)
+        self._fields = _TRAJ_FIELDS_BASE + (_TRAJ_FIELDS_TWO_EGG if two_egg else ())
+        self._w.writerow(self._fields)
+
+    def write_step(self, row: dict):
+        self._w.writerow([row[f] for f in self._fields])
+
+    def close(self):
+        self._fh.close()
+
+
 def _collect_contacts(model, data):
     """Snapshot all active contacts: returns list of (geom1_name, geom2_name, normal_force_N)."""
     force_buf = np.zeros(6)
@@ -154,6 +195,12 @@ def parse_args():
                    help="write per-episode CSV to PATH")
     p.add_argument("--two-egg",  action="store_true",
                    help="two-egg benchmark mode: target + distractor")
+    p.add_argument("--dynamic-dist", action="store_true",
+                   help="give egg2 a random initial rolling velocity (dynamic disturbance mode)")
+    p.add_argument("--collect", action="store_true",
+                   help="export per-step trajectory CSV for every episode")
+    p.add_argument("--collect-dir", default="trajectories",
+                   help="output directory for trajectory CSVs (default: trajectories/)")
     return p.parse_args()
 
 
@@ -178,8 +225,13 @@ def _randomize(model, data, ctrl, rng, bowl_bid, tp):
 
 # ── two-egg scene randomisation ───────────────────────────────────────────────
 
-def _randomize_two_egg(model, data, ctrl, rng, bowl_bid, egg2_bid, egg2_qpos_adr, tp):
-    """Place bowl, target egg, and distractor egg.  Returns distractor initial XY."""
+def _randomize_two_egg(model, data, ctrl, rng, bowl_bid, egg2_bid,
+                        egg2_qpos_adr, egg2_dof_adr, tp, dynamic=False):
+    """Place bowl, target egg, and distractor egg.
+
+    Returns (distractor_init_xy, init_lin_vel_ms, init_ang_vel_rads).
+    When dynamic=True, egg2 receives a random rolling kick after placement.
+    """
     bdx, bdy = rng.uniform(-tp["bowl_xy"], tp["bowl_xy"], 2)
     model.body_pos[bowl_bid] = _BOWL_DEFAULT + [bdx, bdy, 0.0]
     ctrl.reset()
@@ -200,7 +252,27 @@ def _randomize_two_egg(model, data, ctrl, rng, bowl_bid, egg2_bid, egg2_qpos_adr
     data.qpos[egg2_qpos_adr+3:egg2_qpos_adr+7] = [1.0, 0.0, 0.0, 0.0]
 
     mujoco.mj_forward(model, data)
-    return dist_pos[:2].copy()
+
+    init_lin_vel = 0.0
+    init_ang_vel = 0.0
+    if dynamic:
+        # Consistent rolling kick: omega = v / R_eff so egg rolls without initial slip.
+        phi   = rng.uniform(0, 2 * np.pi)
+        v     = rng.uniform(DYNAMIC_VEL_LIN_MAX * 0.3, DYNAMIC_VEL_LIN_MAX)
+        omega = v / _EGG_ROLL_RADIUS
+        # Linear velocity in XY plane
+        data.qvel[egg2_dof_adr + 0] = v * np.cos(phi)
+        data.qvel[egg2_dof_adr + 1] = v * np.sin(phi)
+        data.qvel[egg2_dof_adr + 2] = 0.0
+        # Angular velocity perpendicular to roll direction (right-hand rule)
+        data.qvel[egg2_dof_adr + 3] =  omega * np.sin(phi)
+        data.qvel[egg2_dof_adr + 4] = -omega * np.cos(phi)
+        data.qvel[egg2_dof_adr + 5] = rng.uniform(-0.5, 0.5)  # small axial spin
+        init_lin_vel = round(v, 4)
+        init_ang_vel = round(float(np.linalg.norm(
+            data.qvel[egg2_dof_adr+3:egg2_dof_adr+6])), 3)
+
+    return dist_pos[:2].copy(), init_lin_vel, init_ang_vel
 
 
 # ── title / inter / end cards ─────────────────────────────────────────────────
@@ -321,10 +393,11 @@ def _title_card_two_egg(width, height, tier, n_eps, seed):
     return card
 
 
-def _end_card_two_egg(width, height, tier, records):
+def _end_card_two_egg(width, height, tier, records, dynamic=False):
     """BGR closing card with two-egg benchmark statistics."""
     n          = len(records)
     successes  = sum(1 for r in records if r["result"] == "SUCCESS")
+    rolling    = sum(1 for r in records if "DISTRACTOR_ROLLING"   in r["result"])
     disturbed  = sum(1 for r in records if "DISTRACTOR_DISTURBED" in r["result"])
     dropped    = sum(1 for r in records if "DROPPED"              in r["result"])
     timeout    = sum(1 for r in records if "TIMEOUT"              in r["result"])
@@ -335,10 +408,12 @@ def _end_card_two_egg(width, height, tier, records):
     pct        = 100 * successes // n if n else 0
 
     card = np.zeros((height, width, 3), dtype=np.uint8)
-    cy   = max(14, height // 2 - 170)
+    # Dynamic mode needs one extra result row → start slightly higher
+    cy = max(14, height // 2 - (180 if dynamic else 170))
 
-    cy = _centred_text(card, "FOIB-Egg v2  TWO-EGG RESULTS",
-                       cy, 0.78, (255, 200, 80), thickness=2)
+    title = ("FOIB-Egg v2  TWO-EGG [DYNAMIC]" if dynamic
+             else "FOIB-Egg v2  TWO-EGG RESULTS")
+    cy = _centred_text(card, title, cy, 0.76, (255, 200, 80), thickness=2)
     cy = _centred_text(card,
                        f"Tier: {tier.upper()}   |   Episodes: {n}",
                        cy, 0.54, (180, 180, 180))
@@ -351,6 +426,9 @@ def _end_card_two_egg(width, height, tier, records):
         cy = _centred_text(card, text, cy, scale, col)
 
     _row(f"Target SUCCESS        {successes:>3} / {n}  ({pct:3}%)", (80, 200, 80))
+    if dynamic:
+        _row(f"DISTRACTOR_ROLLING    {rolling:>3} / {n}",
+             (180, 100, 255) if rolling else (90, 90, 90))
     _row(f"DISTRACTOR_DISTURBED  {disturbed:>3} / {n}",
          (60, 60, 220)   if disturbed else (90, 90, 90))
     _row(f"Dropped               {dropped:>3} / {n}",
@@ -368,15 +446,19 @@ def _end_card_two_egg(width, height, tier, records):
     _row(f"Avg distractor disp   {avg_disp:.1f} mm",  (180, 180, 180), 0.50)
     _row(f"Avg steps / ep        {avg_steps}",         (180, 180, 180), 0.50)
 
-    _row("TWO-EGG: 10->7->4->3  (easy->extreme)",    (200, 180, 100), 0.44)
-    _row("FAIL: DISTRACTOR_DISTURBED / DROPPED",      (150, 150, 200), 0.42)
+    if dynamic:
+        _row("DYNAMIC DIST: egg2 init vel active each episode", (200, 180, 100), 0.44)
+    else:
+        _row("TWO-EGG: 10->7->4->3  (easy->extreme)",  (200, 180, 100), 0.44)
+        _row("FAIL: DISTRACTOR_DISTURBED / DROPPED",    (150, 150, 200), 0.42)
     return card
 
 
 # ── episode runner ─────────────────────────────────────────────────────────────
 
 def _run_episode(ctrl, model, data, renderer, writer, args,
-                 ep_num, n_eps, prior_successes, tier):
+                 ep_num, n_eps, prior_successes, tier,
+                 traj_writer=None):
     """Run one episode, write frames.
 
     Returns (phase, fail_str, frames_written, peak_grip).
@@ -395,6 +477,32 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
         phase, fail = ctrl.step()
         mujoco.mj_step(model, data)
 
+        is_terminal = phase in (Phase.DONE, Phase.FAIL)
+
+        if traj_writer is not None and not is_terminal:
+            _bowl = ctrl._bowl_pos if ctrl._bowl_pos is not None else np.zeros(3)
+            traj_writer.write_step({
+                "step": step_i, "episode_id": ep_num, "tier": tier,
+                "phase": phase.name, "ep_result": "",
+                "j1_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[0]]), 5),
+                "j2_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[1]]), 5),
+                "j3_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[2]]), 5),
+                "ee_x": round(float(data.site_xpos[ctrl.ee_site][0]), 5),
+                "ee_y": round(float(data.site_xpos[ctrl.ee_site][1]), 5),
+                "ee_z": round(float(data.site_xpos[ctrl.ee_site][2]), 5),
+                "egg_x": round(float(data.xpos[ctrl.egg_id][0]), 5),
+                "egg_y": round(float(data.xpos[ctrl.egg_id][1]), 5),
+                "egg_z": round(float(data.xpos[ctrl.egg_id][2]), 5),
+                "bowl_x": round(float(_bowl[0]), 5),
+                "bowl_y": round(float(_bowl[1]), 5),
+                "bowl_z": round(float(_bowl[2]), 5),
+                "grip_force": round(float(abs(data.sensordata[ctrl.sen_grip])), 4),
+                "contact_count": sum(1 for i in range(data.ncon)
+                                     if data.contact[i].geom1 in ctrl._egg_geom_ids
+                                     or data.contact[i].geom2 in ctrl._egg_geom_ids),
+                "grasped": int(ctrl._weld_active),
+            })
+
         if step_i % render_every == 0:
             renderer.update_scene(data, camera=args.camera)
             rgb  = renderer.render()
@@ -410,10 +518,35 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
             writer.write(draw(rgb, info)[:, :, ::-1])
             frames_written += 1
 
-        if phase in (Phase.DONE, Phase.FAIL):
+        if is_terminal:
             contacts_end = _collect_contacts(model, data)
             jac_frob     = _ee_jac_frob(model, data, ctrl.ee_site)
             updated_successes = prior_successes + (1 if phase == Phase.DONE else 0)
+            if traj_writer is not None:
+                _fail_s = fail.value if fail is not None else ""
+                _ep_res = "SUCCESS" if phase == Phase.DONE else f"FAIL:{_fail_s}"
+                _bowl   = ctrl._bowl_pos if ctrl._bowl_pos is not None else np.zeros(3)
+                traj_writer.write_step({
+                    "step": step_i, "episode_id": ep_num, "tier": tier,
+                    "phase": phase.name, "ep_result": _ep_res,
+                    "j1_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[0]]), 5),
+                    "j2_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[1]]), 5),
+                    "j3_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[2]]), 5),
+                    "ee_x": round(float(data.site_xpos[ctrl.ee_site][0]), 5),
+                    "ee_y": round(float(data.site_xpos[ctrl.ee_site][1]), 5),
+                    "ee_z": round(float(data.site_xpos[ctrl.ee_site][2]), 5),
+                    "egg_x": round(float(data.xpos[ctrl.egg_id][0]), 5),
+                    "egg_y": round(float(data.xpos[ctrl.egg_id][1]), 5),
+                    "egg_z": round(float(data.xpos[ctrl.egg_id][2]), 5),
+                    "bowl_x": round(float(_bowl[0]), 5),
+                    "bowl_y": round(float(_bowl[1]), 5),
+                    "bowl_z": round(float(_bowl[2]), 5),
+                    "grip_force": round(float(abs(data.sensordata[ctrl.sen_grip])), 4),
+                    "contact_count": sum(1 for i in range(data.ncon)
+                                         if data.contact[i].geom1 in ctrl._egg_geom_ids
+                                         or data.contact[i].geom2 in ctrl._egg_geom_ids),
+                    "grasped": int(ctrl._weld_active),
+                })
             renderer.update_scene(data, camera=args.camera)
             rgb  = renderer.render()
             info = ctrl.overlay_info()
@@ -439,7 +572,8 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
 def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                           ep_num, n_eps, prior_successes, tier,
                           egg2_bid, egg2_geom_ids, finger_geom_ids,
-                          distractor_init_xy, dist_stability_thresh):
+                          distractor_init_xy, dist_stability_thresh,
+                          dynamic=False, traj_writer=None):
     """Run one two-egg episode.  Returns metrics dict."""
     render_every         = max(1, int(round(1.0 / (args.fps * model.opt.timestep))))
     frames_written       = 0
@@ -452,10 +586,20 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
     target_pick_success  = False
     contacts_end         = []
     jac_frob             = 0.0
+    # Dynamic disturbance tracking: self-displacement measured only before
+    # any finger contact so that rolling is distinguished from arm-induced disturbance.
+    finger_contact_ever  = False
+    egg2_self_disp_max   = 0.0
 
     for step_i in range(MAX_STEPS):
         phase, fail = ctrl.step()
         mujoco.mj_step(model, data)
+
+        # Accumulate self-displacement while no finger has touched egg2 yet
+        if dynamic and not finger_contact_ever:
+            egg2_xy_now = data.xpos[egg2_bid, :2]
+            sd = float(np.linalg.norm(egg2_xy_now - distractor_init_xy))
+            egg2_self_disp_max = max(egg2_self_disp_max, sd)
 
         # wrong-contact: finger geom ↔ egg2 geom, checked every sim step
         if not wrong_object_contact:
@@ -464,7 +608,41 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                 if ((g1 in egg2_geom_ids and g2 in finger_geom_ids) or
                         (g2 in egg2_geom_ids and g1 in finger_geom_ids)):
                     wrong_object_contact = True
+                    finger_contact_ever  = True
                     break
+
+        is_terminal = phase in (Phase.DONE, Phase.FAIL)
+
+        if traj_writer is not None and not is_terminal:
+            _bowl = ctrl._bowl_pos if ctrl._bowl_pos is not None else np.zeros(3)
+            _e2xy = data.xpos[egg2_bid, :2]
+            traj_writer.write_step({
+                "step": step_i, "episode_id": ep_num, "tier": tier,
+                "phase": phase.name, "ep_result": "",
+                "j1_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[0]]), 5),
+                "j2_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[1]]), 5),
+                "j3_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[2]]), 5),
+                "ee_x": round(float(data.site_xpos[ctrl.ee_site][0]), 5),
+                "ee_y": round(float(data.site_xpos[ctrl.ee_site][1]), 5),
+                "ee_z": round(float(data.site_xpos[ctrl.ee_site][2]), 5),
+                "egg_x": round(float(data.xpos[ctrl.egg_id][0]), 5),
+                "egg_y": round(float(data.xpos[ctrl.egg_id][1]), 5),
+                "egg_z": round(float(data.xpos[ctrl.egg_id][2]), 5),
+                "bowl_x": round(float(_bowl[0]), 5),
+                "bowl_y": round(float(_bowl[1]), 5),
+                "bowl_z": round(float(_bowl[2]), 5),
+                "grip_force": round(float(abs(data.sensordata[ctrl.sen_grip])), 4),
+                "contact_count": sum(1 for i in range(data.ncon)
+                                     if data.contact[i].geom1 in ctrl._egg_geom_ids
+                                     or data.contact[i].geom2 in ctrl._egg_geom_ids),
+                "grasped": int(ctrl._weld_active),
+                "egg2_x": round(float(data.xpos[egg2_bid][0]), 5),
+                "egg2_y": round(float(data.xpos[egg2_bid][1]), 5),
+                "egg2_z": round(float(data.xpos[egg2_bid][2]), 5),
+                "egg2_disp_mm": round(float(np.linalg.norm(_e2xy - distractor_init_xy)) * 1000, 2),
+                "distractor_rolling": int(dynamic and egg2_self_disp_max > ROLLING_THRESH),
+                "wrong_object_contact": int(wrong_object_contact),
+            })
 
         if step_i % render_every == 0:
             renderer.update_scene(data, camera=args.camera)
@@ -491,16 +669,21 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
             writer.write(draw(rgb, info)[:, :, ::-1])
             frames_written += 1
 
-        if phase in (Phase.DONE, Phase.FAIL):
+        if is_terminal:
             contacts_end = _collect_contacts(model, data)
             jac_frob     = _ee_jac_frob(model, data, ctrl.ee_site)
             egg2_xy_f  = data.xpos[egg2_bid, :2].copy()
             final_disp = float(np.linalg.norm(egg2_xy_f - distractor_init_xy))
             max_distractor_disp = max(max_distractor_disp, final_disp)
             distractor_stable   = max_distractor_disp < dist_stability_thresh
+            distractor_rolling  = dynamic and (egg2_self_disp_max > ROLLING_THRESH)
 
             fail_str = fail.value if fail is not None else ""
-            if phase == Phase.DONE and not distractor_stable:
+            if phase == Phase.DONE and distractor_rolling:
+                # egg2 self-displaced (no arm contact required) — dynamic mode only
+                result      = "FAIL:DISTRACTOR_ROLLING"
+                updated_suc = prior_successes
+            elif phase == Phase.DONE and not distractor_stable:
                 result      = "FAIL:DISTRACTOR_DISTURBED"
                 updated_suc = prior_successes
             elif phase == Phase.DONE:
@@ -509,6 +692,36 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
             else:
                 result      = f"FAIL:{fail_str}"
                 updated_suc = prior_successes
+
+            if traj_writer is not None:
+                _bowl = ctrl._bowl_pos if ctrl._bowl_pos is not None else np.zeros(3)
+                traj_writer.write_step({
+                    "step": step_i, "episode_id": ep_num, "tier": tier,
+                    "phase": phase.name, "ep_result": result,
+                    "j1_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[0]]), 5),
+                    "j2_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[1]]), 5),
+                    "j3_pos": round(float(data.qpos[ctrl._arm_jnt_qposadr[2]]), 5),
+                    "ee_x": round(float(data.site_xpos[ctrl.ee_site][0]), 5),
+                    "ee_y": round(float(data.site_xpos[ctrl.ee_site][1]), 5),
+                    "ee_z": round(float(data.site_xpos[ctrl.ee_site][2]), 5),
+                    "egg_x": round(float(data.xpos[ctrl.egg_id][0]), 5),
+                    "egg_y": round(float(data.xpos[ctrl.egg_id][1]), 5),
+                    "egg_z": round(float(data.xpos[ctrl.egg_id][2]), 5),
+                    "bowl_x": round(float(_bowl[0]), 5),
+                    "bowl_y": round(float(_bowl[1]), 5),
+                    "bowl_z": round(float(_bowl[2]), 5),
+                    "grip_force": round(float(abs(data.sensordata[ctrl.sen_grip])), 4),
+                    "contact_count": sum(1 for i in range(data.ncon)
+                                         if data.contact[i].geom1 in ctrl._egg_geom_ids
+                                         or data.contact[i].geom2 in ctrl._egg_geom_ids),
+                    "grasped": int(ctrl._weld_active),
+                    "egg2_x": round(float(data.xpos[egg2_bid][0]), 5),
+                    "egg2_y": round(float(data.xpos[egg2_bid][1]), 5),
+                    "egg2_z": round(float(data.xpos[egg2_bid][2]), 5),
+                    "egg2_disp_mm": round(final_disp * 1000, 2),
+                    "distractor_rolling": int(distractor_rolling),
+                    "wrong_object_contact": int(wrong_object_contact),
+                })
 
             renderer.update_scene(data, camera=args.camera)
             rgb  = renderer.render()
@@ -538,10 +751,13 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
     target_final_dist = (float(np.linalg.norm(egg1_pos[:2] - bowl_pos[:2]))
                          if bowl_pos is not None else float("nan"))
 
-    # Recompute stable from max (worst-case, not final)
-    distractor_stable = max_distractor_disp < dist_stability_thresh
+    # Recompute stable/rolling from max (worst-case, not final)
+    distractor_stable  = max_distractor_disp < dist_stability_thresh
+    distractor_rolling = dynamic and (egg2_self_disp_max > ROLLING_THRESH)
     fail_str_out = fail.value if fail is not None else ""
-    if phase == Phase.DONE and not distractor_stable:
+    if phase == Phase.DONE and distractor_rolling:
+        result = "FAIL:DISTRACTOR_ROLLING"
+    elif phase == Phase.DONE and not distractor_stable:
         result = "FAIL:DISTRACTOR_DISTURBED"
     elif phase == Phase.DONE:
         result = "SUCCESS"
@@ -559,6 +775,8 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
         "wrong_object_grasp":           False,
         "distractor_displacement_mm":   round(max_distractor_disp * 1000, 1),
         "distractor_stable":            distractor_stable,
+        "distractor_rolling":           distractor_rolling,
+        "egg2_self_disp_mm":            round(egg2_self_disp_max * 1000, 1),
         "target_pick_success":          target_pick_success,
         "target_place_success":         phase == Phase.DONE,
         "target_final_dist_to_bowl_mm": round(target_final_dist * 1000, 1),
@@ -608,6 +826,7 @@ def main():
         egg2_bid  = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY,  "egg2")
         egg2_jnt  = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "egg2_free")
         egg2_qpos_adr = model.jnt_qposadr[egg2_jnt]
+        egg2_dof_adr  = model.jnt_dofadr[egg2_jnt]
         egg2_geom_ids = frozenset(
             i for i in range(model.ngeom)
             if model.geom_bodyid[i] == egg2_bid
@@ -624,6 +843,8 @@ def main():
                 "episode_id", "tier", "result",
                 "target_success", "wrong_object_contact", "wrong_object_grasp",
                 "distractor_displacement_mm", "distractor_stable",
+                "distractor_rolling", "egg2_self_disp_mm",
+                "egg2_init_lin_vel", "egg2_init_ang_vel",
                 "target_pick_success", "target_place_success",
                 "target_final_dist_to_bowl_mm",
                 "steps", "peak_grip", "contact_count",
@@ -644,18 +865,26 @@ def main():
             if n_eps == 1:
                 ctrl.reset()
                 distractor_init_xy = _EGG2_DEFAULT[:2].copy()
+                init_lin_vel = init_ang_vel = 0.0
             else:
-                distractor_init_xy = _randomize_two_egg(
+                distractor_init_xy, init_lin_vel, init_ang_vel = _randomize_two_egg(
                     model, data, ctrl, rng, bowl_bid,
-                    egg2_bid, egg2_qpos_adr, tp,
+                    egg2_bid, egg2_qpos_adr, egg2_dof_adr, tp,
+                    dynamic=args.dynamic_dist,
                 )
 
+            traj_writer = (_TrajWriter(args.collect_dir, ep_num, two_egg=True)
+                           if args.collect else None)
             m = _run_episode_two_egg(
                 ctrl, model, data, renderer, writer, args,
                 ep_num, n_eps, successes, args.tier,
                 egg2_bid, egg2_geom_ids, finger_geom_ids,
                 distractor_init_xy, tp["dist_stability_thresh"],
+                dynamic=args.dynamic_dist,
+                traj_writer=traj_writer,
             )
+            if traj_writer is not None:
+                traj_writer.close()
             total_frames += m["frames_written"]
 
             if m["result"] == "SUCCESS":
@@ -670,6 +899,10 @@ def main():
                 "wrong_object_grasp":           m["wrong_object_grasp"],
                 "distractor_displacement_mm":   m["distractor_displacement_mm"],
                 "distractor_stable":            m["distractor_stable"],
+                "distractor_rolling":           m["distractor_rolling"],
+                "egg2_self_disp_mm":            m["egg2_self_disp_mm"],
+                "egg2_init_lin_vel":            init_lin_vel,
+                "egg2_init_ang_vel":            init_ang_vel,
                 "target_pick_success":          m["target_pick_success"],
                 "target_place_success":         m["target_place_success"],
                 "target_final_dist_to_bowl_mm": m["target_final_dist_to_bowl_mm"],
@@ -685,16 +918,21 @@ def main():
                     rec["target_success"], rec["wrong_object_contact"],
                     rec["wrong_object_grasp"],
                     rec["distractor_displacement_mm"], rec["distractor_stable"],
+                    rec["distractor_rolling"], rec["egg2_self_disp_mm"],
+                    rec["egg2_init_lin_vel"], rec["egg2_init_ang_vel"],
                     rec["target_pick_success"], rec["target_place_success"],
                     rec["target_final_dist_to_bowl_mm"],
                     rec["steps"], f"{rec['peak_grip']:.4f}", rec["contact_count"],
                     "egg", "egg2",
                 ])
 
+            rolling_tag = (f"  rolling={rec['egg2_self_disp_mm']:.1f}mm"
+                           if args.dynamic_dist else "")
             print(f"{rec['result']}  steps={rec['steps']}"
                   f"  peak={rec['peak_grip']:.3f}N"
                   f"  dist_disp={rec['distractor_displacement_mm']:.1f}mm"
-                  f"  wc={int(rec['wrong_object_contact'])}")
+                  f"  wc={int(rec['wrong_object_contact'])}"
+                  f"{rolling_tag}")
             print(f"    JAC_EE ||J||_F={m['ee_jac_frob']:.4f}"
                   f"  contacts@end={len(m['contacts_at_end'])}")
             for cn1, cn2, fn in m["contacts_at_end"]:
@@ -711,7 +949,8 @@ def main():
                 total_frames += inter_n
 
         if n_eps > 1:
-            end   = _end_card_two_egg(args.width, args.height, args.tier, records)
+            end   = _end_card_two_egg(args.width, args.height, args.tier, records,
+                                      dynamic=args.dynamic_dist)
             end_n = int(_HOLD_END * args.fps)
             for _ in range(end_n):
                 writer.write(end)
@@ -738,9 +977,14 @@ def main():
             else:
                 _randomize(model, data, ctrl, rng, bowl_bid, tp)
 
+            traj_writer = (_TrajWriter(args.collect_dir, ep_num, two_egg=False)
+                           if args.collect else None)
             phase, fail_str, nf, peak_grip, contact_max, contacts_end, jac_frob = \
                 _run_episode(ctrl, model, data, renderer, writer, args,
-                             ep_num, n_eps, successes, args.tier)
+                             ep_num, n_eps, successes, args.tier,
+                             traj_writer=traj_writer)
+            if traj_writer is not None:
+                traj_writer.close()
             total_frames += nf
 
             ep_result = "SUCCESS" if phase == Phase.DONE else f"FAIL:{fail_str}"
