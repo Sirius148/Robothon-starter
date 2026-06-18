@@ -288,7 +288,7 @@ Results are deterministic for a fixed seed. Verified on macOS, MuJoCo 3.9.0.
 | Dropped / Timeout | 0 |
 | Peak grip (max) | 0.370 N |
 | Contact max (max) | 2 |
-| Avg steps / ep | 709 |
+| Avg steps / ep | 720 |
 | Video duration | 74.0 s (incl. title + end cards) |
 | Wall time | ~22 s |
 
@@ -301,7 +301,7 @@ Results are deterministic for a fixed seed. Verified on macOS, MuJoCo 3.9.0.
 | Dropped / Timeout | 1 (EP 7, DROPPED) |
 | Peak grip (max) | 0.370 N |
 | Contact max (max) | 4 |
-| Avg steps / ep | 709 |
+| Avg steps / ep | 720 |
 | Video duration | 74.0 s |
 | Wall time | ~25 s |
 
@@ -309,12 +309,12 @@ Results are deterministic for a fixed seed. Verified on macOS, MuJoCo 3.9.0.
 
 | Metric | Value |
 |--------|-------|
-| Shell INTACT | 7 / 10 (70 %) |
+| Shell INTACT | 8 / 10 (80 %) |
 | OVER-SQUEEZED | 0 |
-| Dropped / Timeout | 3 (EP 7, 8, 9 — DROPPED) |
-| Peak grip (max) | 0.370 N |
+| Dropped / Timeout | 2 (EP 5, 7 — DROPPED) |
+| Peak grip (max) | 0.390 N |
 | Contact max (max) | 4 |
-| Avg steps / ep | 709 |
+| Avg steps / ep | 720 |
 | Video duration | 74.0 s |
 | Wall time | ~27 s |
 

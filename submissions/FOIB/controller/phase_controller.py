@@ -52,6 +52,11 @@ _WP = {
     "at_bowl":    np.array([ 1.222,  -0.122,  1.338]),  # ee ≈ [0.08, 0.22, 0.82]
 }
 
+# Maximum rate at which joint ctrl targets are allowed to change (trapezoidal profile).
+# At dt=0.002 s this gives 0.1 rad/step; largest waypoint gap (j1 1.222 rad) ramps
+# in ~13 steps — well within PHASE_TIMEOUT=2000.
+JOINT_MAX_VEL = 50.0  # rad/s
+
 
 class PhaseController:
     def __init__(self, model, data):
@@ -92,6 +97,7 @@ class PhaseController:
             in ("joint1", "joint2", "joint3")
         ]
         self._arm_acts = [self.act_j1, self.act_j2, self.act_j3]
+        self._ctrl_cmd = np.zeros(3)   # smoothed ctrl target for arm joints
 
         self.phase       = Phase.IDLE
         self.fail_reason = FailReason.NONE
@@ -123,6 +129,7 @@ class PhaseController:
         self._weld_active     = False
         self._grasp_local_pos = np.zeros(3)
         self._peak_grip       = 0.0
+        self._ctrl_cmd        = _WP["retract"].copy()   # avoid ramp from zeros
         self._drive_to_waypoint(_WP["retract"])
         self._set_grip(GRIP_OPEN)
 
@@ -293,12 +300,14 @@ class PhaseController:
         self.d.qvel[0:3] = [0.0, 0.0, -0.2]   # gentle downward push at release
 
     def _drive_to_waypoint(self, target_q):
-        """Set joint position targets. PD controller in model will track these."""
-        acts  = self._arm_acts
-        lims  = self.m.actuator_ctrlrange
-        for i, act in enumerate(acts):
-            self.d.ctrl[act] = float(np.clip(target_q[i],
-                                              lims[act, 0], lims[act, 1]))
+        """Ramp joint ctrl targets toward target_q at most JOINT_MAX_VEL rad/s."""
+        lims      = self.m.actuator_ctrlrange
+        max_delta = JOINT_MAX_VEL * self.m.opt.timestep
+        for i, act in enumerate(self._arm_acts):
+            clamped = float(np.clip(target_q[i], lims[act, 0], lims[act, 1]))
+            self._ctrl_cmd[i] += float(np.clip(clamped - self._ctrl_cmd[i],
+                                               -max_delta, max_delta))
+            self.d.ctrl[act] = self._ctrl_cmd[i]
 
     def _at_waypoint(self, target_q):
         """True when all arm joints are within JOINT_THRESH of target."""
