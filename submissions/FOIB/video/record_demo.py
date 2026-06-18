@@ -12,6 +12,7 @@ Tiers:   easy | medium (default) | stress
 """
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -42,7 +43,7 @@ _BOWL_DEFAULT = np.array([0.08,  0.22, 0.760])
 
 _HOLD_TERMINAL = 4.0   # s — freeze terminal frame per episode
 _HOLD_INTER    = 1.5   # s — inter-episode card
-_HOLD_TITLE    = 2.5   # s — opening title card
+_HOLD_TITLE    = 4.0   # s — opening title card
 _HOLD_END      = 4.0   # s — closing results card
 
 # ── Dynamic disturbance constants ──────────────────────────────────────────────
@@ -141,6 +142,14 @@ _TRAJ_FIELDS_TWO_EGG = (
 )
 
 
+def _write_episode_summary(collect_dir, ep_num, fields):
+    """Write a lightweight per-episode summary JSON alongside the trajectory CSV."""
+    os.makedirs(collect_dir, exist_ok=True)
+    path = os.path.join(collect_dir, f"summary_ep{ep_num:03d}.json")
+    with open(path, "w") as fh:
+        json.dump(fields, fh, indent=2)
+
+
 class _TrajWriter:
     """Writes one CSV per episode; each row is one sim step."""
 
@@ -187,6 +196,8 @@ def parse_args():
     p.add_argument("--width",    type=int, default=640)
     p.add_argument("--height",   type=int, default=480)
     p.add_argument("--camera",   default="side_cam")
+    p.add_argument("--dual-cam", action="store_true",
+                   help="side-by-side: main camera (left) + top_cam (right)")
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--seed",     type=int, default=42)
     p.add_argument("--tier",     default="medium",
@@ -289,18 +300,24 @@ def _centred_text(img, text, cy, scale, col, thickness=2):
 def _title_card(width, height, tier, n_eps, seed):
     """BGR opening card: project name, tier, task summary."""
     card = np.zeros((height, width, 3), dtype=np.uint8)
-    cy = height // 2 - 100
+    cy = height // 2 - 110
     cy = _centred_text(card, "FOIB-Egg",
                        cy, 1.10, (255, 200, 80), thickness=3)
     cy = _centred_text(card, "Fragile Object Integrity Benchmark",
                        cy, 0.62, (200, 200, 200))
-    cy += 14
+    cy += 12
     cy = _centred_text(card,
-                       f"Tier: {tier.upper()}   Episodes: {n_eps}   Seed: {seed}",
-                       cy, 0.55, (150, 150, 150))
+                       f"Mode: single-egg   Tier: {tier.upper()}   Episodes: {n_eps}   Seed: {seed}",
+                       cy, 0.50, (150, 150, 150))
     cy = _centred_text(card,
-                       "Shell integrity is the primary scoring criterion",
-                       cy, 0.48, (110, 110, 110))
+                       "Task: pick egg from table, place in bowl without breaking shell",
+                       cy, 0.45, (120, 120, 120))
+    cy = _centred_text(card,
+                       "SUCCESS = egg in bowl + grip force < 12 N throughout",
+                       cy, 0.45, (80, 200, 80))
+    cy = _centred_text(card,
+                       "FAIL = OVER-SQUEEZED | DROPPED | TIMEOUT",
+                       cy, 0.42, (100, 100, 100))
     return card
 
 
@@ -375,21 +392,28 @@ def _end_card(width, height, tier, records):
     return card
 
 
-def _title_card_two_egg(width, height, tier, n_eps, seed):
+def _title_card_two_egg(width, height, tier, n_eps, seed, dynamic=False):
     """BGR opening card for two-egg benchmark."""
+    mode_str = "two-egg-dynamic" if dynamic else "two-egg-static"
     card = np.zeros((height, width, 3), dtype=np.uint8)
-    cy = height // 2 - 100
+    cy = height // 2 - 110
     cy = _centred_text(card, "FOIB-Egg v2",
                        cy, 1.05, (255, 200, 80), thickness=3)
     cy = _centred_text(card, "Two-Egg: Target Selection + Distractor Suppression",
                        cy, 0.50, (200, 200, 200))
-    cy += 14
+    cy += 12
     cy = _centred_text(card,
-                       f"Tier: {tier.upper()}   Episodes: {n_eps}   Seed: {seed}",
-                       cy, 0.55, (150, 150, 150))
+                       f"Mode: {mode_str}   Tier: {tier.upper()}   Episodes: {n_eps}   Seed: {seed}",
+                       cy, 0.46, (150, 150, 150))
     cy = _centred_text(card,
-                       "Distractor must not be grasped or significantly displaced",
-                       cy, 0.44, (110, 110, 110))
+                       "Task: pick white egg, place in bowl; leave orange egg undisturbed",
+                       cy, 0.43, (120, 120, 120))
+    cy = _centred_text(card,
+                       "SUCCESS = egg in bowl + shell intact + distractor unmoved (< 20 mm)",
+                       cy, 0.43, (80, 200, 80))
+    cy = _centred_text(card,
+                       "FAIL = DISTRACTOR_DISTURBED | DROPPED | OVER-SQUEEZED | TIMEOUT",
+                       cy, 0.40, (100, 100, 100))
     return card
 
 
@@ -454,11 +478,73 @@ def _end_card_two_egg(width, height, tier, records, dynamic=False):
     return card
 
 
+def _failure_gallery_card(width, height, gallery):
+    """BGR card showing captured terminal frames for each failure type (max 3)."""
+    card = np.zeros((height, width, 3), dtype=np.uint8)
+    cy = _centred_text(card, "FAILURE SHOWCASE", 20, 0.72, (180, 80, 80), thickness=2)
+    cy = _centred_text(card, "Terminal frames from failure episodes", cy, 0.42, (110, 110, 110))
+    cy += 10
+
+    items = list(gallery.items())[:3]
+    if not items:
+        return card
+
+    n       = len(items)
+    margin  = 16
+    gap     = 10
+    thumb_w = (width - 2 * margin - gap * (n - 1)) // n
+    thumb_h = height - cy - 42
+    x       = margin
+    for fail_code, bgr_frame in items:
+        thumb = cv2.resize(bgr_frame, (thumb_w, thumb_h))
+        card[cy:cy + thumb_h, x:x + thumb_w] = thumb
+        cv2.rectangle(card, (x, cy), (x + thumb_w, cy + thumb_h), (100, 80, 80), 2)
+        ts  = cv2.getTextSize(fail_code, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0]
+        tx  = x + max(0, (thumb_w - ts[0]) // 2)
+        cv2.putText(card, fail_code, (tx, cy + thumb_h + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 100, 100), 1, cv2.LINE_AA)
+        x += thumb_w + gap
+    return card
+
+
+# ── dual-camera compositing ────────────────────────────────────────────────────
+
+def _composite_render(renderer, renderer_top, data, args):
+    """Return RGB H×W×3 frame: side cam alone, or main(top 2/3)+top_cam(bottom 1/3)."""
+    renderer.update_scene(data, camera=args.camera)
+    rgb = renderer.render()
+    if renderer_top is None:
+        return rgb
+    renderer_top.update_scene(data, camera="top_cam")
+    rgb_top = renderer_top.render()
+    h_main = args.height * 2 // 3
+    h_bot  = args.height - h_main
+    main_panel = cv2.resize(rgb[:, :, ::-1], (args.width, h_main))[:, :, ::-1]
+    bot_bgr    = cv2.resize(rgb_top[:, :, ::-1], (args.width, h_bot)).copy()
+    cv2.putText(bot_bgr, "TOP", (6, 14), cv2.FONT_HERSHEY_SIMPLEX,
+                0.42, (180, 180, 180), 1, cv2.LINE_AA)
+    return np.vstack([main_panel, bot_bgr[:, :, ::-1]])
+
+
+def _draw_phase_sub(bgr, phase_name):
+    """Draw a centered phase-name subtitle bar at the bottom of bgr (in-place)."""
+    h, w = bgr.shape[:2]
+    text = f"[ {phase_name} ]"
+    scale, thick = 0.70, 2
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    x, y = (w - tw) // 2, h - 22
+    pad = 8
+    cv2.rectangle(bgr, (x - pad, y - th - pad), (x + tw + pad, y + pad),
+                  (20, 20, 20), -1)
+    cv2.putText(bgr, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (230, 220, 130), thick, cv2.LINE_AA)
+
+
 # ── episode runner ─────────────────────────────────────────────────────────────
 
 def _run_episode(ctrl, model, data, renderer, writer, args,
                  ep_num, n_eps, prior_successes, tier,
-                 traj_writer=None):
+                 traj_writer=None, renderer_top=None, failure_gallery=None):
     """Run one episode, write frames.
 
     Returns (phase, fail_str, frames_written, peak_grip).
@@ -472,6 +558,9 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
     max_contacts   = 0
     contacts_end   = []
     jac_frob       = 0.0
+    _prev_pname    = None
+    _sub_cd        = 0
+    _sub_frames    = max(1, int(1.5 * args.fps))
 
     for step_i in range(MAX_STEPS):
         phase, fail = ctrl.step()
@@ -504,8 +593,7 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
             })
 
         if step_i % render_every == 0:
-            renderer.update_scene(data, camera=args.camera)
-            rgb  = renderer.render()
+            rgb  = _composite_render(renderer, renderer_top, data, args)
             info = ctrl.overlay_info()
             peak_grip   = max(peak_grip,   info["grip_force"])
             max_contacts = max(max_contacts, info.get("contact_count", 0))
@@ -515,7 +603,14 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
                 "ep_successes": prior_successes,
                 "tier":         tier,
             })
-            writer.write(draw(rgb, info)[:, :, ::-1])
+            bgr = draw(rgb, info)[:, :, ::-1]
+            if phase.name != _prev_pname:
+                _prev_pname = phase.name
+                _sub_cd = _sub_frames
+            if _sub_cd > 0 and phase not in (Phase.DONE, Phase.FAIL):
+                _draw_phase_sub(bgr, phase.name)
+                _sub_cd -= 1
+            writer.write(bgr)
             frames_written += 1
 
         if is_terminal:
@@ -547,8 +642,7 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
                                          or data.contact[i].geom2 in ctrl._egg_geom_ids),
                     "grasped": int(ctrl._weld_active),
                 })
-            renderer.update_scene(data, camera=args.camera)
-            rgb  = renderer.render()
+            rgb  = _composite_render(renderer, renderer_top, data, args)
             info = ctrl.overlay_info()
             peak_grip    = max(peak_grip,    info["grip_force"])
             max_contacts = max(max_contacts, info.get("contact_count", 0))
@@ -559,6 +653,10 @@ def _run_episode(ctrl, model, data, renderer, writer, args,
                 "tier":         tier,
             })
             hold_bgr = draw(rgb, info)[:, :, ::-1]
+            if failure_gallery is not None and fail is not None:
+                fc = fail.value
+                if fc not in failure_gallery:
+                    failure_gallery[fc] = hold_bgr.copy()
             hold_n   = int(_HOLD_TERMINAL * args.fps)
             for _ in range(hold_n):
                 writer.write(hold_bgr)
@@ -573,7 +671,8 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                           ep_num, n_eps, prior_successes, tier,
                           egg2_bid, egg2_geom_ids, finger_geom_ids,
                           distractor_init_xy, dist_stability_thresh,
-                          dynamic=False, traj_writer=None):
+                          dynamic=False, traj_writer=None,
+                          renderer_top=None, failure_gallery=None):
     """Run one two-egg episode.  Returns metrics dict."""
     render_every         = max(1, int(round(1.0 / (args.fps * model.opt.timestep))))
     frames_written       = 0
@@ -586,6 +685,9 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
     target_pick_success  = False
     contacts_end         = []
     jac_frob             = 0.0
+    _prev_pname          = None
+    _sub_cd              = 0
+    _sub_frames          = max(1, int(1.5 * args.fps))
     # Dynamic disturbance tracking: self-displacement measured only before
     # any finger contact so that rolling is distinguished from arm-induced disturbance.
     finger_contact_ever  = False
@@ -645,8 +747,7 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
             })
 
         if step_i % render_every == 0:
-            renderer.update_scene(data, camera=args.camera)
-            rgb  = renderer.render()
+            rgb  = _composite_render(renderer, renderer_top, data, args)
             info = ctrl.overlay_info()
             peak_grip    = max(peak_grip,    info["grip_force"])
             max_contacts = max(max_contacts, info.get("contact_count", 0))
@@ -666,7 +767,14 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                 "distractor_disp": dist_disp,
                 "egg_sep":         egg_sep,
             })
-            writer.write(draw(rgb, info)[:, :, ::-1])
+            bgr = draw(rgb, info)[:, :, ::-1]
+            if phase.name != _prev_pname:
+                _prev_pname = phase.name
+                _sub_cd = _sub_frames
+            if _sub_cd > 0 and phase not in (Phase.DONE, Phase.FAIL):
+                _draw_phase_sub(bgr, phase.name)
+                _sub_cd -= 1
+            writer.write(bgr)
             frames_written += 1
 
         if is_terminal:
@@ -723,8 +831,7 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                     "wrong_object_contact": int(wrong_object_contact),
                 })
 
-            renderer.update_scene(data, camera=args.camera)
-            rgb  = renderer.render()
+            rgb  = _composite_render(renderer, renderer_top, data, args)
             info = ctrl.overlay_info()
             peak_grip    = max(peak_grip,    info["grip_force"])
             max_contacts = max(max_contacts, info.get("contact_count", 0))
@@ -739,6 +846,10 @@ def _run_episode_two_egg(ctrl, model, data, renderer, writer, args,
                 "egg_sep":         egg_sep_f,
             })
             hold_bgr = draw(rgb, info)[:, :, ::-1]
+            if failure_gallery is not None and result != "SUCCESS":
+                fc = result.split(":", 1)[-1]
+                if fc not in failure_gallery:
+                    failure_gallery[fc] = hold_bgr.copy()
             hold_n   = int(_HOLD_TERMINAL * args.fps)
             for _ in range(hold_n):
                 writer.write(hold_bgr)
@@ -794,6 +905,9 @@ def main():
     model    = mujoco.MjModel.from_xml_path(SCENE)
     data     = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
+    _h_bot       = args.height - args.height * 2 // 3
+    renderer_top = (mujoco.Renderer(model, height=_h_bot, width=args.width)
+                    if args.dual_cam else None)
     ctrl     = PhaseController(model, data)
     bowl_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "bowl")
 
@@ -807,12 +921,13 @@ def main():
         csv_fh     = open(args.log, "w", newline="")
         csv_writer = csv.writer(csv_fh)
 
-    rng          = np.random.default_rng(args.seed)
-    n_eps        = args.episodes
-    successes    = 0
-    total_frames = 0
-    records      = []
-    render_every = max(1, int(round(1.0 / (args.fps * model.opt.timestep))))
+    rng             = np.random.default_rng(args.seed)
+    n_eps           = args.episodes
+    successes       = 0
+    total_frames    = 0
+    records         = []
+    failure_gallery = {}
+    render_every    = max(1, int(round(1.0 / (args.fps * model.opt.timestep))))
 
     mode_tag = "two-egg" if args.two_egg else "single-egg"
     print(f"Recording → {args.out}  ({args.fps} fps, camera={args.camera})")
@@ -852,7 +967,8 @@ def main():
             ])
 
         if n_eps > 1:
-            title   = _title_card_two_egg(args.width, args.height, args.tier, n_eps, args.seed)
+            title   = _title_card_two_egg(args.width, args.height, args.tier, n_eps, args.seed,
+                                          dynamic=args.dynamic_dist)
             title_n = int(_HOLD_TITLE * args.fps)
             for _ in range(title_n):
                 writer.write(title)
@@ -882,6 +998,8 @@ def main():
                 distractor_init_xy, tp["dist_stability_thresh"],
                 dynamic=args.dynamic_dist,
                 traj_writer=traj_writer,
+                renderer_top=renderer_top,
+                failure_gallery=failure_gallery,
             )
             if traj_writer is not None:
                 traj_writer.close()
@@ -925,6 +1043,25 @@ def main():
                     rec["steps"], f"{rec['peak_grip']:.4f}", rec["contact_count"],
                     "egg", "egg2",
                 ])
+
+            if args.collect:
+                _mode = "two-egg-dynamic" if args.dynamic_dist else "two-egg-static"
+                _write_episode_summary(args.collect_dir, ep_num, {
+                    "episode_id":      ep_num,
+                    "tier":            args.tier,
+                    "mode":            _mode,
+                    "result":          m["result"],
+                    "steps":           ctrl.step_count,
+                    "peak_grip":       round(m["peak_grip"], 4),
+                    "contact_count":   m["contact_count"],
+                    "target_success":  m["target_success"],
+                    "distractor_result": {
+                        "stable":           m["distractor_stable"],
+                        "displacement_mm":  m["distractor_displacement_mm"],
+                        "wrong_contact":    m["wrong_object_contact"],
+                        "rolling":          m["distractor_rolling"],
+                    },
+                })
 
             rolling_tag = (f"  rolling={rec['egg2_self_disp_mm']:.1f}mm"
                            if args.dynamic_dist else "")
@@ -982,7 +1119,9 @@ def main():
             phase, fail_str, nf, peak_grip, contact_max, contacts_end, jac_frob = \
                 _run_episode(ctrl, model, data, renderer, writer, args,
                              ep_num, n_eps, successes, args.tier,
-                             traj_writer=traj_writer)
+                             traj_writer=traj_writer,
+                             renderer_top=renderer_top,
+                             failure_gallery=failure_gallery)
             if traj_writer is not None:
                 traj_writer.close()
             total_frames += nf
@@ -1005,6 +1144,19 @@ def main():
                                       f"{rec['peak_grip']:.4f}", rec["contact_max"],
                                       rec["steps"]])
 
+            if args.collect:
+                _write_episode_summary(args.collect_dir, ep_num, {
+                    "episode_id":      ep_num,
+                    "tier":            args.tier,
+                    "mode":            "single",
+                    "result":          ep_result,
+                    "steps":           ctrl.step_count,
+                    "peak_grip":       round(peak_grip, 4),
+                    "contact_count":   contact_max,
+                    "target_success":  phase == Phase.DONE,
+                    "distractor_result": None,
+                })
+
             print(f"{ep_result}  steps={ctrl.step_count}"
                   f"  peak_grip={peak_grip:.3f}N  frames={nf}")
             print(f"    JAC_EE ||J||_F={jac_frob:.4f}  contacts@end={len(contacts_end)}")
@@ -1026,9 +1178,18 @@ def main():
                 writer.write(end)
             total_frames += end_n
 
+    if failure_gallery and n_eps > 1:
+        gal   = _failure_gallery_card(args.width, args.height, failure_gallery)
+        gal_n = int(_HOLD_END * args.fps)
+        for _ in range(gal_n):
+            writer.write(gal)
+        total_frames += gal_n
+
     # ── teardown (shared) ─────────────────────────────────────────────────────
     writer.release()
     renderer.close()
+    if renderer_top is not None:
+        renderer_top.close()
     if csv_fh:
         csv_fh.close()
 
