@@ -1,0 +1,13 @@
+# Verified environment: Python 3.11.13, macOS 14+
+# Tested versions: mujoco 3.9.0 | numpy 2.4.6 | opencv-python 4.13.0
+
+# MuJoCo is pinned exactly: 3.x releases have had API changes that can
+# break MJCF loading, renderer calls, and sensor indexing.
+mujoco==3.9.0
+
+# numpy 1.x and 2.x are both compatible; default_rng available since 1.17.
+numpy>=1.24.0
+
+# opencv major version is capped: 5.x has pending breaking API changes.
+# On Linux, replace the avc1 fourcc in record_demo.py with mp4v or XVID.
+opencv-python>=4.8.0,<5.0

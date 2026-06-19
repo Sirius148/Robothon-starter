@@ -1,0 +1,35 @@
+<mujoco model="egg">
+  <worldbody>
+    <!-- Egg: ellipsoid approximated with sphere scaled via size -->
+    <body name="egg" pos="0.22 0.0 0.765">
+      <freejoint name="egg_free"/>
+      <geom name="egg_geom"
+            type="ellipsoid"
+            size="0.025 0.022 0.032"
+            mass="0.065"
+            friction="0.8 0.1 0.005"
+            condim="4"
+            rgba="1.0 0.98 0.85 1"
+            contype="1" conaffinity="1"/>
+      <site name="egg_center" size="0.005" rgba="1 1 0 0.5"/>
+    </body>
+
+    <!-- Bowl / tray target -->
+    <body name="bowl" pos="-0.10 0.0 0.75">
+      <!-- Bowl floor -->
+      <geom name="bowl_floor"
+            type="cylinder"
+            size="0.055 0.005"
+            pos="0 0 0"
+            rgba="0.6 0.3 0.1 1"
+            contype="1" conaffinity="1"/>
+      <!-- Bowl wall (thin ring, 4 sides approximation) -->
+      <geom name="bowl_wall_f" type="box" size="0.055 0.006 0.018" pos="0  0.055 0.013" rgba="0.6 0.3 0.1 1"/>
+      <geom name="bowl_wall_b" type="box" size="0.055 0.006 0.018" pos="0 -0.055 0.013" rgba="0.6 0.3 0.1 1"/>
+      <geom name="bowl_wall_l" type="box" size="0.006 0.055 0.018" pos="-0.055 0 0.013" rgba="0.6 0.3 0.1 1"/>
+      <geom name="bowl_wall_r" type="box" size="0.006 0.055 0.018" pos=" 0.055 0 0.013" rgba="0.6 0.3 0.1 1"/>
+      <!-- Success zone site -->
+      <site name="bowl_center" size="0.01" pos="0 0 0.015" rgba="0 1 0 0.6"/>
+    </body>
+  </worldbody>
+</mujoco>
