@@ -1,0 +1,165 @@
+<mujoco model="egg_pick_place">
+  <compiler angle="radian"/>
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker"
+             rgb1="0.85 0.85 0.85" rgb2="0.7 0.7 0.7" width="512" height="512"/>
+    <material name="table_mat" texture="grid" texrepeat="4 4" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <!-- Floor -->
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.5 0.5 0.5 1"
+          contype="1" conaffinity="7"/>
+
+    <!-- Table -->
+    <geom name="table_top" type="box" size="0.5 0.4 0.015"
+          pos="0.15 0 0.745" material="table_mat"
+          contype="0" conaffinity="0"/>
+    <!-- Plane collision surface: box-ellipsoid contact has numerical drift;
+         plane-ellipsoid contact is exact and stable. -->
+    <geom name="table_surface" type="plane" size="0.5 0.4 0.1"
+          pos="0.15 0 0.760" rgba="0 0 0 0"
+          contype="1" conaffinity="7"/>
+    <geom name="leg1" type="cylinder" size="0.02 0.37" pos="-0.30  0.35 0.375" rgba="0.6 0.5 0.4 1"/>
+    <geom name="leg2" type="cylinder" size="0.02 0.37" pos=" 0.60  0.35 0.375" rgba="0.6 0.5 0.4 1"/>
+    <geom name="leg3" type="cylinder" size="0.02 0.37" pos="-0.30 -0.35 0.375" rgba="0.6 0.5 0.4 1"/>
+    <geom name="leg4" type="cylinder" size="0.02 0.37" pos=" 0.60 -0.35 0.375" rgba="0.6 0.5 0.4 1"/>
+
+    <!-- Cameras -->
+    <camera name="side_cam" pos="0.15 -0.85 1.1" xyaxes="1 0 0 0 0.45 1"/>
+    <camera name="top_cam"  pos="0.15  0.0  1.65" xyaxes="1 0 0 0 1 0"/>
+
+    <!-- Lights -->
+    <light name="main" pos="0.2 0 2.0" dir="0 0 -1"
+           diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <light name="fill" pos="-0.8 0 1.5" dir="1 0 -1"
+           diffuse="0.3 0.3 0.3"/>
+
+    <!-- Egg: placed in front of arm -->
+    <body name="egg" pos="0.26 0.0 0.800">
+      <freejoint name="egg_free"/>
+      <geom name="egg_geom"
+            type="ellipsoid"
+            size="0.025 0.022 0.032"
+            mass="0.065"
+            friction="0.8 0.1 0.005"
+            condim="4"
+            rgba="1.0 0.98 0.85 1"
+            contype="2" conaffinity="1"/>
+      <site name="egg_center" size="0.005" rgba="1 1 0 0.5"/>
+    </body>
+
+    <!-- Distractor egg: orange, default 8 cm +Y from target — placed here for mj_resetData -->
+    <body name="egg2" pos="0.26 0.08 0.800">
+      <freejoint name="egg2_free"/>
+      <geom name="egg2_geom"
+            type="ellipsoid"
+            size="0.025 0.022 0.032"
+            mass="0.065"
+            friction="0.8 0.1 0.005"
+            condim="4"
+            rgba="1.0 0.65 0.3 1"
+            contype="4" conaffinity="1"/>
+      <site name="egg2_center" size="0.005" rgba="1 0.5 0 0.5"/>
+    </body>
+
+    <!-- Bowl: placed to the side of arm so joint1 only needs ~70 deg rotation -->
+    <body name="bowl" pos="0.08 0.22 0.760">
+      <geom name="bowl_floor" type="cylinder" size="0.055 0.006"
+            pos="0 0 0" rgba="0.65 0.32 0.12 1" contype="1" conaffinity="7"/>
+      <geom name="bowl_wall_f" type="box" size="0.055 0.006 0.018"
+            pos="0  0.058 0.014" rgba="0.65 0.32 0.12 1" contype="1" conaffinity="7"/>
+      <geom name="bowl_wall_b" type="box" size="0.055 0.006 0.018"
+            pos="0 -0.058 0.014" rgba="0.65 0.32 0.12 1" contype="1" conaffinity="7"/>
+      <geom name="bowl_wall_l" type="box" size="0.006 0.055 0.018"
+            pos="-0.058 0 0.014" rgba="0.65 0.32 0.12 1" contype="1" conaffinity="7"/>
+      <geom name="bowl_wall_r" type="box" size="0.006 0.055 0.018"
+            pos=" 0.058 0 0.014" rgba="0.65 0.32 0.12 1" contype="1" conaffinity="7"/>
+      <site name="bowl_center" size="0.008" pos="0 0 0.018" rgba="0 1 0 0.7"/>
+    </body>
+
+    <!-- Egg shell shards: physically scattered on OVER-SQUEEZED failure.
+         Kept at z=-5 (underground/invisible) during normal play; mj_resetData
+         automatically restores them between episodes.
+         contype=4 / conaffinity=4 → bounce on table/floor only; never touch fingers or egg. -->
+    <body name="shard_0" pos="0 0 -5"><freejoint name="shard0_free"/>
+      <geom type="sphere" size="0.009" rgba="1.00 0.95 0.80 1" mass="0.002"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_1" pos="0 0 -5"><freejoint name="shard1_free"/>
+      <geom type="sphere" size="0.007" rgba="0.98 0.92 0.75 1" mass="0.001"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_2" pos="0 0 -5"><freejoint name="shard2_free"/>
+      <geom type="sphere" size="0.011" rgba="1.00 0.98 0.85 1" mass="0.003"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_3" pos="0 0 -5"><freejoint name="shard3_free"/>
+      <geom type="sphere" size="0.008" rgba="0.96 0.90 0.72 1" mass="0.002"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_4" pos="0 0 -5"><freejoint name="shard4_free"/>
+      <geom type="sphere" size="0.010" rgba="1.00 0.96 0.82 1" mass="0.002"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_5" pos="0 0 -5"><freejoint name="shard5_free"/>
+      <geom type="sphere" size="0.006" rgba="0.95 0.88 0.70 1" mass="0.001"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_6" pos="0 0 -5"><freejoint name="shard6_free"/>
+      <geom type="sphere" size="0.012" rgba="0.99 0.94 0.79 1" mass="0.003"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+    <body name="shard_7" pos="0 0 -5"><freejoint name="shard7_free"/>
+      <geom type="sphere" size="0.008" rgba="1.00 0.97 0.84 1" mass="0.002"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001"/></body>
+
+    <!-- Robot arm: centered at table origin -->
+    <body name="arm_mount" pos="0.0 0 0.760">
+      <include file="arm_bodies.xml"/>
+    </body>
+  </worldbody>
+
+  <!-- Contact pair: finger_a ↔ egg with full friction cone (condim=6).
+       Enables realistic wrench sensing at the primary contact finger. -->
+  <contact>
+    <pair geom1="finger_a_geom" geom2="egg_geom" condim="6"/>
+  </contact>
+
+  <!-- Three independent finger actuators — each finger has its own position
+       controller.  This enables adaptive multi-finger coordination: after the
+       kinematic grasp weld fires, finger_a holds position while finger_b and
+       finger_c close slightly further to confirm the symmetric wrap. -->
+  <actuator>
+    <position name="act_j1"     joint="joint1"            kp="50" ctrlrange="-3.14 3.14"/>
+    <position name="act_j2"     joint="joint2"            kp="50" ctrlrange="-1.57 1.57"/>
+    <position name="act_j3"     joint="joint3"            kp="50" ctrlrange="-2.0  2.0"/>
+    <position name="act_grip_a" joint="finger_left_joint" kp="20" ctrlrange="0 0.035"/>
+    <position name="act_grip_b" joint="finger_b_joint"    kp="20" ctrlrange="0 0.035"/>
+    <position name="act_grip_c" joint="finger_c_joint"    kp="20" ctrlrange="0 0.035"/>
+  </actuator>
+
+  <sensor>
+    <!-- Per-finger grip-effort sensors: independent actuatorfrc for each finger.
+         grip_force (act_grip_a) is the primary contact-force indicator.
+         grip_b_force / grip_c_force show each finger's closure effort, enabling
+         per-finger force monitoring and grasp symmetry analysis even when B/C
+         do not physically contact the egg (contype=0). -->
+    <actuatorfrc name="grip_force"   actuator="act_grip_a"/>
+    <actuatorfrc name="grip_b_force" actuator="act_grip_b"/>
+    <actuatorfrc name="grip_c_force" actuator="act_grip_c"/>
+    <actuatorfrc name="j1_torque"    actuator="act_j1"/>
+    <actuatorfrc name="j2_torque"    actuator="act_j2"/>
+    <actuatorfrc name="j3_torque"    actuator="act_j3"/>
+    <!-- Fingertip touch sensors: tip_a fires when finger_a contacts the egg.
+         tip_b/c are structural; they sit on contype=0 geoms so do not fire
+         from physical contact, but may read non-zero from constraint forces
+         transmitted through the kinematic weld. -->
+    <touch name="touch_tip_a" site="tip_a"/>
+    <touch name="touch_tip_b" site="tip_b"/>
+    <touch name="touch_tip_c" site="tip_c"/>
+  </sensor>
+
+</mujoco>

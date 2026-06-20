@@ -1,0 +1,11 @@
+ep,tier,result,grip_peak,contact_max,steps,grasp_quality
+1,medium,SUCCESS,0.4300,3,713,0.9571
+2,medium,SUCCESS,0.4900,3,698,0.9579
+3,medium,SUCCESS,0.4600,2,784,0.9572
+4,medium,SUCCESS,0.5000,3,645,0.9557
+5,medium,SUCCESS,0.4800,3,716,0.9574
+6,medium,SUCCESS,0.5300,3,601,0.9557
+7,medium,SUCCESS,0.4900,3,643,0.9568
+8,medium,SUCCESS,0.5000,3,638,0.9564
+9,medium,SUCCESS,0.5100,2,778,0.9568
+10,medium,SUCCESS,0.4800,3,709,0.9580
