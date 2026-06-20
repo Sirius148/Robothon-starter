@@ -1,0 +1,68 @@
+<mujoco model="arm">
+  <default>
+    <joint damping="2.0" armature="0.1"/>
+    <geom contype="1" conaffinity="1" friction="1.0 0.1 0.01" rgba="0.4 0.4 0.8 1"/>
+  </default>
+
+  <worldbody>
+    <!-- Base -->
+    <body name="base" pos="0 0 0.05">
+      <geom type="cylinder" size="0.05 0.05" rgba="0.3 0.3 0.3 1"/>
+
+      <!-- Joint 1: shoulder rotation (Z axis) -->
+      <body name="link1" pos="0 0 0.05">
+        <joint name="joint1" type="hinge" axis="0 0 1" range="-3.14 3.14"/>
+        <geom type="capsule" fromto="0 0 0 0 0 0.18" size="0.025"/>
+
+        <!-- Joint 2: shoulder pitch (Y axis) -->
+        <body name="link2" pos="0 0 0.18">
+          <joint name="joint2" type="hinge" axis="0 1 0" range="-1.57 1.57"/>
+          <geom type="capsule" fromto="0 0 0 0.20 0 0" size="0.022"/>
+
+          <!-- Joint 3: elbow pitch (Y axis) -->
+          <body name="link3" pos="0.20 0 0">
+            <joint name="joint3" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+            <geom type="capsule" fromto="0 0 0 0.16 0 0" size="0.018"/>
+
+            <!-- Gripper base -->
+            <body name="gripper_base" pos="0.16 0 0">
+              <geom type="box" size="0.025 0.025 0.015" rgba="0.5 0.5 0.5 1"/>
+
+              <!-- Left finger -->
+              <body name="finger_left" pos="0 -0.025 -0.025">
+                <joint name="finger_left_joint" type="slide" axis="0 1 0" range="0 0.03"/>
+                <geom type="box" size="0.008 0.008 0.028" rgba="0.8 0.6 0.2 1"/>
+                <site name="tip_left" pos="0 0 -0.028" size="0.005"/>
+              </body>
+
+              <!-- Right finger -->
+              <body name="finger_right" pos="0 0.025 -0.025">
+                <joint name="finger_right_joint" type="slide" axis="0 -1 0" range="0 0.03"/>
+                <geom type="box" size="0.008 0.008 0.028" rgba="0.8 0.6 0.2 1"/>
+                <site name="tip_right" pos="0 0 -0.028" size="0.005"/>
+              </body>
+
+              <!-- End effector site -->
+              <site name="ee" pos="0.01 0 -0.055" size="0.006" rgba="1 0 0 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="act_j1" joint="joint1"       kp="50" ctrlrange="-3.14 3.14"/>
+    <position name="act_j2" joint="joint2"       kp="50" ctrlrange="-1.57 1.57"/>
+    <position name="act_j3" joint="joint3"       kp="50" ctrlrange="-2.0  2.0"/>
+    <position name="act_grip" joint="finger_left_joint"  kp="20" ctrlrange="0 0.03"/>
+    <!-- right finger mirrors left via equality constraint defined in scene.xml -->
+  </actuator>
+
+  <sensor>
+    <actuatorfrc name="grip_force" actuator="act_grip"/>
+    <actuatorfrc name="j1_torque"  actuator="act_j1"/>
+    <actuatorfrc name="j2_torque"  actuator="act_j2"/>
+    <actuatorfrc name="j3_torque"  actuator="act_j3"/>
+  </sensor>
+</mujoco>
